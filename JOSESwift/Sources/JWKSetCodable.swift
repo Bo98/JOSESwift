@@ -3,6 +3,7 @@
 //  JOSESwift
 //
 //  Created by Daniel Egger on 15.02.18.
+//  Modified by Jarrod Moldrich on 02.07.18.
 //
 //  ---------------------------------------------------------------------------
 //  Copyright 2018 Airside Mobile Inc.
@@ -27,6 +28,46 @@ enum JWKSetParameter: String, CodingKey {
     case keys
 }
 
+internal enum JWKBaseParameter: String, CodingKey {
+    case kty
+    case d
+}
+
+internal enum JWKTypeError: Error {
+    case typeIsECPrivate
+    case typeIsECPublic
+    case typeIsRSAPublic
+    case typeIsRSAPrivate
+    case typeIsSymmetric
+    case typeIsUnknown
+}
+
+class JWKBase: Decodable {
+    required init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: JWKBaseParameter.self)
+        let key = try container.decode(String.self, forKey: .kty)
+        let d = try? container.decode(String.self, forKey: .d)
+        switch key {
+        case "RSA":
+            if d == nil {
+                throw JWKTypeError.typeIsRSAPublic
+            } else {
+                throw JWKTypeError.typeIsRSAPrivate
+            }
+        case "oct":
+            throw JWKTypeError.typeIsSymmetric
+        case "EC":
+            if d == nil {
+                throw JWKTypeError.typeIsECPublic
+            } else {
+                throw JWKTypeError.typeIsECPrivate
+            }
+        default:
+            throw JWKTypeError.typeIsUnknown
+        }
+    }
+}
+
 extension JWKSet: Encodable {
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: JWKSetParameter.self)
@@ -43,6 +84,12 @@ extension JWKSet: Encodable {
             case is SymmetricKey:
                 // swiftlint:disable:next force_cast
                 try keyContainer.encode(key as! SymmetricKey)
+            case is ECPublicKey:
+                // swiftlint:disable:next force_cast
+                try keyContainer.encode(key as! ECPublicKey)
+            case is ECPrivateKey:
+                // swiftlint:disable:next force_cast
+                try keyContainer.encode(key as! ECPrivateKey)
             default:
                 break
             }
@@ -57,26 +104,30 @@ extension JWKSet: Decodable {
 
         var keys: [JWK] = []
         while !keyContainer.isAtEnd {
+            var key: JWK?
 
-            if let key = try? keyContainer.decode(RSAPrivateKey.self) {
-                keys.append(key)
-                continue
+            do {
+                _ = try keyContainer.decode(JWKBase.self)
+            } catch JWKTypeError.typeIsECPublic {
+                key = try keyContainer.decode(ECPublicKey.self)
+            } catch JWKTypeError.typeIsECPrivate {
+                key = try keyContainer.decode(ECPrivateKey.self)
+            } catch JWKTypeError.typeIsRSAPublic {
+                key = try keyContainer.decode(RSAPublicKey.self)
+            } catch JWKTypeError.typeIsRSAPrivate {
+                key = try keyContainer.decode(RSAPrivateKey.self)
+            } catch JWKTypeError.typeIsSymmetric {
+                key = try keyContainer.decode(SymmetricKey.self)
             }
 
-            if let key = try? keyContainer.decode(RSAPublicKey.self) {
-                keys.append(key)
-                continue
+            guard let decodedKey = key else {
+                throw DecodingError.dataCorruptedError(in: keyContainer, debugDescription: """
+                    No RSAPrivateKey, RSAPublicKey, SymmetricKey, ECPublicKey, ECPrivateKey found to decode.
+                    """
+                )
             }
 
-            if let key = try? keyContainer.decode(SymmetricKey.self) {
-                keys.append(key)
-                continue
-            }
-
-            throw DecodingError.dataCorruptedError(in: keyContainer, debugDescription: """
-                No RSAPrivateKey, RSAPublicKey, or SymmetricKey found to decode.
-                """
-            )
+            keys.append(decodedKey)
         }
 
         self.init(keys: keys)
