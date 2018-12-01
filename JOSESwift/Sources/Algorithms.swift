@@ -25,8 +25,12 @@ import Foundation
 
 /// An algorithm for signing and verifying.
 ///
-/// - RS512: [RSASSA-PKCS1-v1_5 using SHA-512](https://tools.ietf.org/html/rfc7518#section-3.3)
+/// - HS256/HS384/RS512: [RSASSA-PKCS1-v1_5 using SHA-512](https://tools.ietf.org/html/rfc7518#section-3.2)
+/// - RS256/RS512: [RSASSA-PKCS1-v1_5 using SHA-512](https://tools.ietf.org/html/rfc7518#section-3.3)
 public enum SignatureAlgorithm: String {
+	case HS256 = "HS256"
+	case HS384 = "HS384"
+	case HS512 = "HS512"
     case RS256 = "RS256"
     case RS512 = "RS512"
 }
@@ -95,12 +99,20 @@ public enum SymmetricKeyAlgorithm: String {
 
 /// An algorithm for HMAC calculation.
 ///
+/// - SHA256
+/// - SHA384
 /// - SHA512
 public enum HMACAlgorithm: String {
+	case SHA256 = "SHA256"
+	case SHA384 = "SHA384"
     case SHA512 = "SHA512"
 
     var outputLength: Int {
         switch self {
+		case .SHA256:
+			return 32
+		case .SHA384:
+			return 48
         case .SHA512:
             return 64
         }

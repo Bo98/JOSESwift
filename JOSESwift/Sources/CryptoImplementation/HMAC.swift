@@ -24,16 +24,56 @@
 import Foundation
 import CommonCrypto
 
+internal enum HMACError: Error {
+	case algorithmNotSupported
+}
+
 fileprivate extension HMACAlgorithm {
     var ccAlgorithm: CCAlgorithm {
         switch self {
+		case .SHA256:
+			return CCAlgorithm(kCCHmacAlgSHA256)
+		case .SHA384:
+			return CCAlgorithm(kCCHmacAlgSHA384)
         case .SHA512:
             return CCAlgorithm(kCCHmacAlgSHA512)
         }
     }
 }
 
+fileprivate extension SignatureAlgorithm {
+	var hmacAlgorithm: HMACAlgorithm? {
+		switch self {
+		case .HS256:
+			return .SHA256
+		case .HS384:
+			return .SHA384
+		case .HS512:
+			return .SHA512
+		default:
+			return nil
+		}
+	}
+}
+
 internal struct HMAC {
+	typealias KeyType = Data
+
+	/// Helper method that converts SignatureAlgorithm to HMACAlgorithm before calling the calculate method below.
+	///
+	/// - Parameters:
+	///   - input: The input to calculate a HMAC for.
+	///   - key: The key used in the HMAC algorithm.
+	///   - algorithm: The algorithm used to calculate the HMAC.
+	/// - Returns: The calculated HMAC.
+	/// - Throws: `HMACError` if the algorithm is invalid.
+	static func calculate(from input: Data, with key: KeyType, using algorithm: SignatureAlgorithm) throws -> Data {
+		guard let algorithm = algorithm.hmacAlgorithm else {
+			throw HMACError.algorithmNotSupported
+		}
+		return HMAC.calculate(from: input, with: key, using: algorithm)
+	}
+
     /// Calculates a HMAC of an input with a specific HMAC algorithm and the corresponding HMAC key.
     ///
     /// - Parameters:
@@ -41,7 +81,7 @@ internal struct HMAC {
     ///   - key: The key used in the HMAC algorithm.
     ///   - algorithm: The algorithm used to calculate the HMAC.
     /// - Returns: The calculated HMAC.
-    static func calculate(from input: Data, with key: Data, using algorithm: HMACAlgorithm) -> Data {
+    static func calculate(from input: Data, with key: KeyType, using algorithm: HMACAlgorithm) -> Data {
         var hmacOutData = Data(count: algorithm.outputLength)
 
         hmacOutData.withUnsafeMutableBytes { hmacOutBytes in
