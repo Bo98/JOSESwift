@@ -165,20 +165,44 @@ internal struct EC {
     /// - Returns: The signature.
     /// - Throws: `ECError` if any errors occur while signing the input data.
     static func sign(_ signingInput: Data, with privateKey: KeyType, and algorithm: SignatureAlgorithm) throws -> Data {
-		// Sign the input as raw elliptic curve coordinates using a hashing algorithm and a private key.
-		guard let curveType = algorithm.curveType else {
-			throw ECError.invalidCurveDigestAlgorithm
-		}
-		let digest = try algorithm.createDigest(input: signingInput)
-		var signatureLength = curveType.signatureOctetLength
-		let signature = NSMutableData(length: signatureLength)!
-		let signatureBytes = signature.mutableBytes.assumingMemoryBound(to: UInt8.self)
-		let status = SecKeyRawSign(privateKey, .sigRaw, digest, digest.count, signatureBytes, &signatureLength)
-		if status != 0 {
-			throw ECError.signingFailed(description: "Error creating signature. (OSStatus: \(status))")
-		}
+		if #available(iOS 10.0, *)
+		{
+			// Sign the input as raw elliptic curve coordinates using a hashing algorithm and a private key.
+			let digest = Data(bytes: try algorithm.createDigest(input: signingInput))
 
-		return signature as Data
+			let algorithm = SecKeyAlgorithm.ecdsaSignatureRFC4754
+			guard SecKeyIsAlgorithmSupported(privateKey, .sign, algorithm) else {
+				throw ECError.algorithmNotSupported
+			}
+
+			var signingError: Unmanaged<CFError>?
+			guard let signature = SecKeyCreateSignature(privateKey, algorithm, digest as CFData, &signingError) else {
+				throw ECError.signingFailed(
+					description: signingError?.takeRetainedValue().localizedDescription ?? "No description available."
+				)
+			}
+
+			return signature as Data
+		}
+		else
+		{
+			#if !os(macOS)
+				// Sign the input as raw elliptic curve coordinates using a hashing algorithm and a private key.
+				guard let curveType = algorithm.curveType else {
+					throw ECError.invalidCurveDigestAlgorithm
+				}
+				let digest = try algorithm.createDigest(input: signingInput)
+				var signatureLength = curveType.signatureOctetLength
+				let signature = NSMutableData(length: signatureLength)!
+				let signatureBytes = signature.mutableBytes.assumingMemoryBound(to: UInt8.self)
+				let status = SecKeyRawSign(privateKey, .sigRaw, digest, digest.count, signatureBytes, &signatureLength)
+				if status != 0 {
+					throw ECError.signingFailed(description: "Error creating signature. (OSStatus: \(status))")
+				}
+
+				return signature as Data
+			#endif
+		}
     }
 
     /// Verifies input data against a signature with a given elliptic curve algorithm and the corresponding public key.
@@ -191,15 +215,43 @@ internal struct EC {
     /// - Returns: True if the signature is verified, false if it is not verified.
     /// - Throws: `ECError` if any errors occur while verifying the input data against the signature.
     static func verify(_ verifyingInput: Data, against signature: Data, with publicKey: KeyType, and algorithm: SignatureAlgorithm) throws -> Bool {
-		// Verify the raw signature against an input with a hashing algorithm and public key.
-		guard let curveType = algorithm.curveType else {
-			throw ECError.invalidCurveDigestAlgorithm
+		if #available(iOS 10.0, *)
+		{
+			// Verify the raw signature against an input with a hashing algorithm and a public key.
+			let digest = Data(bytes: try algorithm.createDigest(input: verifyingInput))
+
+			let algorithm = SecKeyAlgorithm.ecdsaSignatureRFC4754
+			guard SecKeyIsAlgorithmSupported(publicKey, .verify, algorithm) else {
+				throw ECError.algorithmNotSupported
+			}
+
+			var verificationError: Unmanaged<CFError>?
+			guard
+				SecKeyVerifySignature(
+					publicKey, algorithm, digest as CFData, signature as CFData, &verificationError
+				)
+			else {
+				if let description = verificationError?.takeRetainedValue().localizedDescription {
+					throw ECError.verifyingFailed(description: description)
+				}
+
+				return false
+			}
 		}
-		let digest = try algorithm.createDigest(input: verifyingInput)
-		let signatureBytes: [UInt8] = Array(signature)
-		let status = SecKeyRawVerify(publicKey, .sigRaw, digest, digest.count, signatureBytes, curveType.signatureOctetLength)
-		if status != 0 {
-			throw ECError.verifyingFailed(description: "Error validating signature. (OSStatus: \(status))")
+		else
+		{
+			#if !os(macOS)
+				// Verify the raw signature against an input with a hashing algorithm and public key.
+				guard let curveType = algorithm.curveType else {
+					throw ECError.invalidCurveDigestAlgorithm
+				}
+				let digest = try algorithm.createDigest(input: verifyingInput)
+				let signatureBytes: [UInt8] = Array(signature)
+				let status = SecKeyRawVerify(publicKey, .sigRaw, digest, digest.count, signatureBytes, curveType.signatureOctetLength)
+				if status != 0 {
+					throw ECError.verifyingFailed(description: "Error validating signature. (OSStatus: \(status))")
+				}
+			#endif
 		}
 
         return true
