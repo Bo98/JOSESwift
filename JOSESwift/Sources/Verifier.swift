@@ -48,6 +48,12 @@ public struct Verifier {
     /// - Returns: A fully initialized `Verifier` or `nil` if provided key is of the wrong type.
     public init?<KeyType>(verifyingAlgorithm: SignatureAlgorithm, publicKey: KeyType) {
         switch verifyingAlgorithm {
+		case .HS256, .HS384, .HS512:
+			guard type(of: publicKey) is HMACVerifier.KeyType.Type else {
+				return nil
+			}
+			// swiftlint:disable:next force_cast
+			self.verifier = HMACVerifier(algorithm: verifyingAlgorithm, key: publicKey as! HMACVerifier.KeyType)
         case .RS256, .RS512:
             guard type(of: publicKey) is RSAVerifier.KeyType.Type else {
                 return nil
