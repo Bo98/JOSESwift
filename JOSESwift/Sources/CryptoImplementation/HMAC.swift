@@ -72,7 +72,7 @@ internal struct HMAC {
 		guard let algorithm = algorithm.hmacAlgorithm else {
 			throw HMACError.algorithmNotSupported
 		}
-		return HMAC.calculate(from: input, with: key, using: algorithm)
+		return try HMAC.calculate(from: input, with: key, using: algorithm)
 	}
 
     /// Calculates a HMAC of an input with a specific HMAC algorithm and the corresponding HMAC key.
