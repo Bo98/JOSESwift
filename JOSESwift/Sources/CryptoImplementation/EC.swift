@@ -124,6 +124,50 @@ fileprivate extension SignatureAlgorithm {
             return nil
         }
     }
+
+	typealias DigestFunction = (
+            UnsafeRawPointer?,
+            UInt32,
+            UnsafeMutablePointer<UInt8>?
+    ) -> UnsafeMutablePointer<UInt8>?
+
+    func createDigest(input: Data) throws -> [UInt8] {
+        guard
+                let computedDigestLength = digestLength,
+                let computedDigestFunction = digestFunction
+                else {
+            throw ECError.invalidCurveDigestAlgorithm
+        }
+        var digest = [UInt8](repeating: 0, count: computedDigestLength)
+        _ = computedDigestFunction(Array(input), UInt32(input.count), &digest)
+        return digest
+    }
+
+    var digestLength: Int? {
+        switch self {
+        case .ES256:
+            return Int(CC_SHA256_DIGEST_LENGTH)
+        case .ES384:
+            return Int(CC_SHA384_DIGEST_LENGTH)
+        case .ES512:
+            return Int(CC_SHA512_DIGEST_LENGTH)
+        default:
+            return nil
+        }
+    }
+
+	var digestFunction: DigestFunction? {
+        switch self {
+        case .ES256:
+            return CC_SHA256
+        case .ES384:
+            return CC_SHA384
+        case .ES512:
+            return CC_SHA512
+        default:
+            return nil
+        }
+    }
 }
 
 // Point compression prefix. Based on X9.62, Section 4.3.6
@@ -264,8 +308,6 @@ internal struct EC {
                 return true
             #endif
         }
-
-        return false
     }
 
     // Converting integers to and from DER encoded ASN.1 as described here:
