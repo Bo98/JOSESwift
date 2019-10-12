@@ -147,40 +147,66 @@ internal struct EC {
     /// - Returns: The signature.
     /// - Throws: `ECError` if any errors occur while signing the input data.
     static func sign(_ signingInput: Data, with privateKey: KeyType, and algorithm: SignatureAlgorithm) throws -> Data {
-        guard let curveType = algorithm.curveType else {
-            throw ECError.invalidCurveDigestAlgorithm
-        }
-        guard let secKeyAlgorithm = algorithm.secKeyAlgorithm else {
-            throw ECError.algorithmNotSupported
-        }
-
-        var cfErrorRef: Unmanaged<CFError>?
-        guard let signature = SecKeyCreateSignature(privateKey, secKeyAlgorithm, signingInput as CFData, &cfErrorRef) else {
-            if let error = cfErrorRef {
-                let cfError = error.takeRetainedValue()
-                let errorDomain = CFErrorGetDomain(cfError)
-                let errorCode = CFErrorGetCode(cfError)
-
-                if errorDomain == LAErrorDomain as CFErrorDomain {
-                    throw ECError.localAuthenticationFailed(errorCode: errorCode)
-                }
-                throw ECError.signingFailed(description: "Error creating signature. (CFError: \(cfError))")
+        if #available(iOS 10.0, *)
+        {
+            guard let curveType = algorithm.curveType else {
+                throw ECError.invalidCurveDigestAlgorithm
             }
-            fatalError("SecKeyCreateSignature returned nil but did not set CFError object.")
+            guard let secKeyAlgorithm = algorithm.secKeyAlgorithm else {
+                throw ECError.algorithmNotSupported
+            }
+
+            var cfErrorRef: Unmanaged<CFError>?
+            guard let signature = SecKeyCreateSignature(privateKey, secKeyAlgorithm, signingInput as CFData, &cfErrorRef) else {
+                if let error = cfErrorRef {
+                    let cfError = error.takeRetainedValue()
+                    let errorDomain = CFErrorGetDomain(cfError)
+                    let errorCode = CFErrorGetCode(cfError)
+
+                    if errorDomain == LAErrorDomain as CFErrorDomain {
+                        throw ECError.localAuthenticationFailed(errorCode: errorCode)
+                    }
+                    throw ECError.signingFailed(description: "Error creating signature. (CFError: \(cfError))")
+                }
+                fatalError("SecKeyCreateSignature returned nil but did not set CFError object.")
+            }
+
+            // unpack BER encoded ASN.1 format signature to raw format as specified for JWS
+            let ecSignatureTLV = [UInt8](signature as Data)
+            do {
+                let ecSignature = try ecSignatureTLV.read(.sequence)
+                let varlenR = try Data(ecSignature.read(.integer))
+                let varlenS = try Data(ecSignature.skip(.integer).read(.integer))
+                let fixlenR = Asn1IntegerConversion.toRaw(varlenR, of: curveType.coordinateOctetLength)
+                let fixlenS = Asn1IntegerConversion.toRaw(varlenS, of: curveType.coordinateOctetLength)
+
+                return fixlenR + fixlenS
+            } catch {
+                throw ECError.signingFailed(description: "Could not unpack ASN.1 EC signature.")
+            }
         }
+        else
+        {
+            #if !os(macOS)
+                // Sign the input as raw elliptic curve coordinates using a hashing algorithm and a private key.
+                guard let curveType = algorithm.curveType else {
+                    throw ECError.invalidCurveDigestAlgorithm
+                }
+                let digest = try algorithm.createDigest(input: signingInput)
+                var signatureLength = curveType.signatureOctetLength
 
-        // unpack BER encoded ASN.1 format signature to raw format as specified for JWS
-        let ecSignatureTLV = [UInt8](signature as Data)
-        do {
-            let ecSignature = try ecSignatureTLV.read(.sequence)
-            let varlenR = try Data(ecSignature.read(.integer))
-            let varlenS = try Data(ecSignature.skip(.integer).read(.integer))
-            let fixlenR = Asn1IntegerConversion.toRaw(varlenR, of: curveType.coordinateOctetLength)
-            let fixlenS = Asn1IntegerConversion.toRaw(varlenS, of: curveType.coordinateOctetLength)
+                guard let signature = NSMutableData(length: signatureLength) else {
+                    throw ECError.couldNotAllocateMemoryForSignature
+                }
 
-            return fixlenR + fixlenS
-        } catch {
-            throw ECError.signingFailed(description: "Could not unpack ASN.1 EC signature.")
+                let signatureBytes = signature.mutableBytes.assumingMemoryBound(to: UInt8.self)
+                let status = SecKeyRawSign(privateKey, .sigRaw, digest, digest.count, signatureBytes, &signatureLength)
+                if status != errSecSuccess {
+                    throw ECError.signingFailed(description: "Error creating signature. (OSStatus: \(status))")
+                }
+
+                return signature as Data
+            #endif
         }
     }
 
@@ -194,30 +220,52 @@ internal struct EC {
     /// - Returns: True if the signature is verified, false if it is not verified.
     /// - Throws: `ECError` if any errors occur while verifying the input data against the signature.
     static func verify(_ verifyingInput: Data, against signature: Data, with publicKey: KeyType, and algorithm: SignatureAlgorithm) throws -> Bool {
-        // verify the raw signature against an input with a hashing algorithm and public key
-        guard let curveType = algorithm.curveType else {
-            throw ECError.invalidCurveDigestAlgorithm
+		if #available(iOS 10.0, *)
+        {
+            // verify the raw signature against an input with a hashing algorithm and public key
+            guard let curveType = algorithm.curveType else {
+                throw ECError.invalidCurveDigestAlgorithm
+            }
+            guard let secKeyAlgorithm = algorithm.secKeyAlgorithm else {
+                throw ECError.algorithmNotSupported
+            }
+            if signature.count != (curveType.coordinateOctetLength * 2) {
+                throw ECError.verifyingFailed(description: "Signature is \(signature.count) bytes long instead of the expected \(curveType.coordinateOctetLength * 2).")
+            }
+
+            // pack raw signature as specified for JWS into BER encoded ASN.1 format
+            let fixlenR = signature.prefix(curveType.coordinateOctetLength)
+            let varlenR = [UInt8](Asn1IntegerConversion.fromRaw(fixlenR))
+            let fixlenS = signature.suffix(curveType.coordinateOctetLength)
+            let varlenS = [UInt8](Asn1IntegerConversion.fromRaw(fixlenS))
+            let asn1Signature = Data((varlenR.encode(as: .integer) + varlenS.encode(as: .integer)).encode(as: .sequence))
+
+            var cfErrorRef: Unmanaged<CFError>?
+            let isValid = SecKeyVerifySignature(publicKey, secKeyAlgorithm, verifyingInput as CFData, asn1Signature as CFData, &cfErrorRef)
+            if let error = cfErrorRef {
+                throw ECError.verifyingFailed(description: "Error verifying signature. (CFError: \(error.takeRetainedValue()))")
+            }
+            return isValid
         }
-        guard let secKeyAlgorithm = algorithm.secKeyAlgorithm else {
-            throw ECError.algorithmNotSupported
-        }
-        if signature.count != (curveType.coordinateOctetLength * 2) {
-            throw ECError.verifyingFailed(description: "Signature is \(signature.count) bytes long instead of the expected \(curveType.coordinateOctetLength * 2).")
+        else
+        {
+            #if !os(macOS)
+                // Verify the raw signature against an input with a hashing algorithm and public key.
+                guard let curveType = algorithm.curveType else {
+                    throw ECError.invalidCurveDigestAlgorithm
+                }
+                let digest = try algorithm.createDigest(input: verifyingInput)
+                let signatureBytes: [UInt8] = Array(signature)
+                let status = SecKeyRawVerify(publicKey, .sigRaw, digest, digest.count, signatureBytes, curveType.signatureOctetLength)
+                if status != errSecSuccess {
+                    throw ECError.verifyingFailed(description: "Error validating signature. (OSStatus: \(status))")
+                }
+
+                return true
+            #endif
         }
 
-        // pack raw signature as specified for JWS into BER encoded ASN.1 format
-        let fixlenR = signature.prefix(curveType.coordinateOctetLength)
-        let varlenR = [UInt8](Asn1IntegerConversion.fromRaw(fixlenR))
-        let fixlenS = signature.suffix(curveType.coordinateOctetLength)
-        let varlenS = [UInt8](Asn1IntegerConversion.fromRaw(fixlenS))
-        let asn1Signature = Data((varlenR.encode(as: .integer) + varlenS.encode(as: .integer)).encode(as: .sequence))
-
-        var cfErrorRef: Unmanaged<CFError>?
-        let isValid = SecKeyVerifySignature(publicKey, secKeyAlgorithm, verifyingInput as CFData, asn1Signature as CFData, &cfErrorRef)
-        if let error = cfErrorRef {
-            throw ECError.verifyingFailed(description: "Error verifying signature. (CFError: \(error.takeRetainedValue()))")
-        }
-        return isValid
+        return false
     }
 
     // Converting integers to and from DER encoded ASN.1 as described here:
